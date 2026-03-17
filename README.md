@@ -15,12 +15,12 @@ Supported feeds:
 - **RTPPM**
 
 Incoming messages are decoded and optionally stored in PostgreSQL.
+------
 
 <p align="center">
   <img src="docs/gui_login.png" width="25%" />
   <img src="docs/gui_main.png" width="45%" />
 </p>
-------
 
 # GUI Interface
 
