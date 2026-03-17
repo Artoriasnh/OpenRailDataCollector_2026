@@ -1,0 +1,43 @@
+{
+  "open_rail": {
+    "email": "your_open_rail_email",
+    "password": "your_open_rail_password",
+    "rail_host": "publicdatafeeds.networkrail.co.uk",
+    "rail_port": 61618,
+    "durable": false
+  },
+  "database": {
+    "sql_host": "host.docker.internal",
+    "port": 5432,
+    "database_name": "postgres",
+    "sql_username": "postgres",
+    "sql_password": "your_postgres_password",
+    "schema_name": "public"
+  },
+  "run_options": {
+    "save_to_database": true,
+    "view_live_messages": false,
+    "log_file": "logs/runtime.log",
+    "log_level": "INFO"
+  },
+  "subscriptions": {
+    "TD": {
+      "enabled": true,
+      "areas": ["All area"]
+    },
+    "Train Movement": {
+      "enabled": true,
+      "types": ["\"0001\": \"activation\"", "\"0002\": \"cancellation\"", "\"0003\": \"movement\""]
+    },
+    "VSTP": {
+      "enabled": true
+    },
+    "RTPPM": {
+      "enabled": true,
+      "pages": ["NationalPage_Sector", "NationalPage_Operator"]
+    }
+  },
+  "sop_files": {
+    "Derby": ""
+  }
+}
