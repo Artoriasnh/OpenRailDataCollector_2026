@@ -29257,3 +29257,9 @@
 2026-03-17 23:14:50,456 - Stopping collector for /topic/VSTP_ALL
 2026-03-17 23:14:50,456 - Stopping collector for /topic/RTPPM_ALL
 2026-03-17 23:14:50,456 - Collection stopped
+2026-03-24 03:39:07,021 - Collection starting...
+2026-03-24 03:39:07,021 - Rail host=publicdatafeeds.networkrail.co.uk, port=61618, durable=True
+2026-03-24 03:39:07,021 - DB host=host.docker.internal, port=5432, db=postgres, schema=public
+2026-03-24 03:39:15,421 - Collection starting...
+2026-03-24 03:39:15,421 - Rail host=publicdatafeeds.networkrail.co.uk, port=61618, durable=True
+2026-03-24 03:39:15,421 - DB host=host.docker.internal, port=5432, db=postgres, schema=public

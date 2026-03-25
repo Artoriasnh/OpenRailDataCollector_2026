@@ -1,16 +1,16 @@
-import psycopg2 as pg
-from datetime import datetime
-from pytz import timezone
-from MSG import TD
-from SOP_con.DY_SOP import DY_SOP
-from SOP_con.DY_state_container import DY_state_container
-from SOP_con.DY_address_update_state_container import DY_address_update_state_container
-import re
+import copy
+import json
 import logging
+import re
+from datetime import datetime
+from pathlib import Path
+
+import psycopg2 as pg
+from pytz import timezone
+
+from MSG import TD
 
 TIMEZONE_LONDON: timezone = timezone("Europe/London")
-state_container = DY_state_container
-address_update_state_container = DY_address_update_state_container
 
 
 class msg_to_sql(object):
@@ -89,8 +89,48 @@ class TD_msg(msg_to_sql):
                  area_id, output_writer=None):
         self.area_id = area_id
         self.logger = output_writer or logging.getLogger("AppLogger")
+
+        self.dy_sop = {}
+        self.state_container = {}
+        self.address_update_state_container = {}
+
         super().__init__(schema_name, data_type, database_name, sql_username, sql_password, sql_host, port,
                          table_format)
+
+        if self.area_id == "Derby":
+            self._load_derby_runtime_jsons()
+
+    def _load_json_file(self, path: Path, default_value):
+        if not path.exists():
+            return copy.deepcopy(default_value)
+
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _load_derby_runtime_jsons(self):
+        try:
+            base_dir = Path(__file__).resolve().parent / "SOP_con"
+
+            sop_json = base_dir / "DY_SOP.json"
+            state_json = base_dir / "DY_state_container.json"
+            address_json = base_dir / "DY_address_update_state_container.json"
+
+            self.dy_sop = self._load_json_file(sop_json, {})
+            self.state_container = self._load_json_file(state_json, {})
+            self.address_update_state_container = self._load_json_file(address_json, {})
+
+            self.logger.info(
+                f"Derby JSON loaded: "
+                f"{len(self.dy_sop)} SOP addresses, "
+                f"{len(self.state_container)} state addresses, "
+                f"{len(self.address_update_state_container)} update-state addresses"
+            )
+
+        except Exception as e:
+            self.dy_sop = {}
+            self.state_container = {}
+            self.address_update_state_container = {}
+            self.logger.warning(f"Failed to load Derby JSON files: {e}")
 
     def get_changed_type(self, address_dec) -> str:
         changed_type = ('Signal' if (0 <= address_dec <= 15) else
@@ -141,25 +181,34 @@ class TD_msg(msg_to_sql):
     def decode_S_class(self, address, data):
         NUM_OF_BITS = 8
         SCALE = 16
-        SOP = DY_SOP
         address_dec = int(address, SCALE)
+
+        if str(address_dec) not in self.dy_sop:
+            raise KeyError(str(address_dec))
+
         data_bin = bin(int(data, SCALE))[2:].zfill(NUM_OF_BITS)
         data_MSB = data_bin[::-1]
 
         s_msg = []
-        change_list = list(SOP[str(address_dec)].values())
+        change_list = list(self.dy_sop[str(address_dec)].values())
         for j in range(0, len(change_list)):
             s_msg.append([self.get_changed_type(address_dec), change_list[j], data_MSB[j]])
         return s_msg
 
     def update_container(self, s_msg, address_dec):
+        if str(address_dec) not in self.state_container:
+            raise KeyError(str(address_dec))
+
         for j in range(0, len(s_msg)):
             if s_msg[j][1] == '':
                 continue
             else:
-                state_container[str(address_dec)][s_msg[j][1]] = s_msg[j][2]
+                self.state_container[str(address_dec)][s_msg[j][1]] = s_msg[j][2]
 
     def get_changed_msg(self, s_msg, address_dec):
+        if str(address_dec) not in self.state_container:
+            raise KeyError(str(address_dec))
+
         changed_msg = []
         for j in range(0, len(s_msg)):
             signal_id = s_msg[j][1]
@@ -167,10 +216,10 @@ class TD_msg(msg_to_sql):
             if not signal_id:
                 continue
 
-            if signal_id not in state_container[str(address_dec)]:
+            if signal_id not in self.state_container[str(address_dec)]:
                 continue
 
-            if state_container[str(address_dec)][signal_id] != s_msg[j][2]:
+            if self.state_container[str(address_dec)][signal_id] != s_msg[j][2]:
                 changed_msg.append([s_msg[j][0], signal_id, s_msg[j][2]])
 
         return changed_msg
@@ -235,10 +284,10 @@ class TD_msg(msg_to_sql):
                     s_msg = self.decode_S_class(address, data)
 
                     address_dec = int(address, 16)
-                    if address_update_state_container[str(address_dec)] == 0:
-                        address_update_state_container[str(address_dec)] = 1
+                    if self.address_update_state_container[str(address_dec)] == 0:
+                        self.address_update_state_container[str(address_dec)] = 1
                         self.update_container(s_msg, address_dec)
-                        if len(set(list(address_update_state_container.values()))) == 1:
+                        if len(set(list(self.address_update_state_container.values()))) == 1:
                             self.logger.info("Full initial state acquisition successful")
                     else:
                         changed_msg = self.get_changed_msg(s_msg, address_dec)
@@ -261,10 +310,10 @@ class TD_msg(msg_to_sql):
                         s_msg = self.decode_S_class(address_, data_)
 
                         address_dec = int(address_, 16)
-                        if address_update_state_container[str(address_dec)] == 0:
-                            address_update_state_container[str(address_dec)] = 1
+                        if self.address_update_state_container[str(address_dec)] == 0:
+                            self.address_update_state_container[str(address_dec)] = 1
                             self.update_container(s_msg, address_dec)
-                            if len(set(list(address_update_state_container.values()))) == 1:
+                            if len(set(list(self.address_update_state_container.values()))) == 1:
                                 self.logger.info("Full initial state acquisition successful")
                         else:
                             changed_msg = self.get_changed_msg(s_msg, address_dec)
@@ -341,12 +390,12 @@ class TD_msg(msg_to_sql):
                         s_msg = self.decode_S_class(address, data)
                         address_dec = int(address, 16)
 
-                        if address_update_state_container[str(address_dec)] == 0:
-                            address_update_state_container[str(address_dec)] = 1
+                        if self.address_update_state_container[str(address_dec)] == 0:
+                            self.address_update_state_container[str(address_dec)] = 1
                             self.update_container(s_msg, address_dec)
-                            if len(set(list(address_update_state_container.values()))) == 1:
+                            if len(set(list(self.address_update_state_container.values()))) == 1:
                                 self.logger.info("Full initial state acquisition successful")
-                                self.creat_insert_initial_state(state_container, message["time"])
+                                self.creat_insert_initial_state(self.state_container, message["time"])
                         else:
                             changed_msg = self.get_changed_msg(s_msg, address_dec)
                             self.update_container(s_msg, address_dec)
@@ -373,12 +422,12 @@ class TD_msg(msg_to_sql):
                             s_msg = self.decode_S_class(address_, data_)
 
                             address_dec = int(address_, 16)
-                            if address_update_state_container[str(address_dec)] == 0:
-                                address_update_state_container[str(address_dec)] = 1
+                            if self.address_update_state_container[str(address_dec)] == 0:
+                                self.address_update_state_container[str(address_dec)] = 1
                                 self.update_container(s_msg, address_dec)
-                                if len(set(list(address_update_state_container.values()))) == 1:
+                                if len(set(list(self.address_update_state_container.values()))) == 1:
                                     self.logger.info("Full initial state acquisition successful")
-                                    self.creat_insert_initial_state(state_container, message["time"])
+                                    self.creat_insert_initial_state(self.state_container, message["time"])
                             else:
                                 changed_msg = self.get_changed_msg(s_msg, address_dec)
                                 self.update_container(s_msg, address_dec)

@@ -1,10 +1,10 @@
 {
   "open_rail": {
-    "email": "your_open_rail_email",
-    "password": "your_open_rail_password",
+    "email": "925884246@qq.com",
+    "password": "Esperando-0259",
     "rail_host": "publicdatafeeds.networkrail.co.uk",
     "rail_port": 61618,
-    "durable": false
+    "durable": true
   },
   "database": {
     "sql_host": "host.docker.internal",
@@ -16,7 +16,7 @@
   },
   "run_options": {
     "save_to_database": true,
-    "view_live_messages": false,
+    "view_live_messages": true,
     "log_file": "logs/runtime.log",
     "log_level": "INFO"
   },

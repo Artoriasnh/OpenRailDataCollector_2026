@@ -1,5 +1,6 @@
 import logging
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from ui.qt_log_handler import QtLogHandler
 from Message_to_sql import TD_msg, TM_MVT_msg, VSTP_msg, RTPPM_msg
 from get_data import get_data
 from MSG import table_format, topic_dict, Listener_dict, TM_MESSAGES
+from SOP_con.SOP import prepare_sop_for_runtime
 
 
 class MainWindow(QMainWindow):
@@ -87,6 +89,20 @@ class MainWindow(QMainWindow):
             "subscription_name": safe,
             "subscription_id": safe,
         }
+
+    def _project_root(self) -> Path:
+        return Path(__file__).resolve().parent.parent
+
+    def _sop_dir(self) -> Path:
+        sop_dir = self._project_root() / "sop"
+        sop_dir.mkdir(parents=True, exist_ok=True)
+        return sop_dir
+
+    def _save_sop_to_project_folder(self, source_file_path: str) -> str:
+        source_path = Path(source_file_path).resolve()
+        target_path = self._sop_dir() / source_path.name
+        shutil.copy2(source_path, target_path)
+        return str(target_path)
 
     def setup_logger(self):
         logger_name = f"MainWindowLogger_{id(self)}"
@@ -169,12 +185,12 @@ class MainWindow(QMainWindow):
                 self.refresh_status()
                 return
 
-            file_path = self._prompt_and_select_sop_file("Derby")
+            saved_path = self._prompt_and_select_sop_file("Derby")
 
-            if file_path:
-                self.settings_data["derby_sop_path"] = file_path
+            if saved_path:
+                self.settings_data["derby_sop_path"] = saved_path
                 self.settings_data["derby_enabled"] = True
-                self.append_log(f"Derby SOP selected: {file_path}")
+                self.append_log(f"Derby SOP saved to: {saved_path}")
             else:
                 self.feed_selector.tree.blockSignals(True)
                 item.setCheckState(0, Qt.Unchecked)
@@ -468,7 +484,14 @@ class MainWindow(QMainWindow):
         if not file_path:
             return None
 
-        return file_path
+        try:
+            saved_path = self._save_sop_to_project_folder(file_path)
+            prepare_sop_for_runtime(saved_path, copy_source_to_sop_dir=False)
+            return saved_path
+        except Exception as e:
+            QMessageBox.warning(self, "SOP Save Error", f"Failed to save or process SOP file:\n{e}")
+            self.append_log(f"Failed to save or process SOP file: {e}")
+            return None
 
     def closeEvent(self, event):
         try:
