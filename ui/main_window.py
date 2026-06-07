@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QMainWindow, QMessageBox, QVBoxLayout, QFileDialog
-
+from logging.handlers import RotatingFileHandler
 from ui.generated.main_ui import Ui_MainWindow
 from ui.settings_window import SettingsWindow
 from ui.widgets.feed_selector import FeedSelectorWidget
@@ -118,7 +118,12 @@ class MainWindow(QMainWindow):
 
         formatter = logging.Formatter("%(asctime)s - %(message)s")
 
-        file_handler = logging.FileHandler(self.log_path, encoding="utf-8")
+        file_handler = RotatingFileHandler(
+            self.log_path,
+            maxBytes=500 * 1024 * 1024,
+            backupCount=2,
+            encoding="utf-8"
+        )
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
 

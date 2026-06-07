@@ -1,5 +1,6 @@
 import json
 import stomp
+from psycopg2 import InterfaceError, OperationalError
 
 
 class Listener_(stomp.ConnectionListener):
@@ -18,6 +19,20 @@ class Listener_(stomp.ConnectionListener):
             except Exception:
                 pass
         print(message)
+
+    def _handle_db_error(self, label: str, error: Exception, frame):
+        self._log(f"[{label} DB ERROR] {error}")
+        self._log(f"[{label} DB ERROR HEADERS] {frame.headers}")
+
+        try:
+            if hasattr(self.mts, "reconnect"):
+                self.mts.reconnect()
+                self._log(f"[{label} DB RECONNECTED]")
+        except Exception as reconnect_error:
+            self._log(f"[{label} DB RECONNECT FAILED] {reconnect_error}")
+
+        # Do not ACK here. If durable/client-individual ACK is enabled,
+        # the broker can redeliver the message after the collector recovers.
 
     def _ack_if_needed(self, frame):
         if not self.is_durable:
@@ -77,6 +92,8 @@ class TD_Listener(Listener_):
 
             self._ack_if_needed(frame)
 
+        except (OperationalError, InterfaceError) as e:
+            self._handle_db_error("TD", e, frame)
         except Exception as e:
             self._log(f"[TD ERROR] {e}")
             self._log(f"[TD ERROR HEADERS] {frame.headers}")
@@ -102,6 +119,8 @@ class TM_MVT_Listener(Listener_):
 
             self._ack_if_needed(frame)
 
+        except (OperationalError, InterfaceError) as e:
+            self._handle_db_error("MVT", e, frame)
         except Exception as e:
             self._log(f"MVT listener error: {e}")
             self._log(f"[MVT ERROR HEADERS] {frame.headers}")
@@ -127,6 +146,8 @@ class VSTP_Listener(Listener_):
 
             self._ack_if_needed(frame)
 
+        except (OperationalError, InterfaceError) as e:
+            self._handle_db_error("VSTP", e, frame)
         except Exception as e:
             self._log(f"VSTP listener error: {e}")
             self._log(f"[VSTP ERROR HEADERS] {frame.headers}")
@@ -152,6 +173,8 @@ class RTPPM_Listener(Listener_):
 
             self._ack_if_needed(frame)
 
+        except (OperationalError, InterfaceError) as e:
+            self._handle_db_error("RTPPM", e, frame)
         except Exception as e:
             self._log(f"RTPPM listener error: {e}")
             self._log(f"[RTPPM ERROR HEADERS] {frame.headers}")

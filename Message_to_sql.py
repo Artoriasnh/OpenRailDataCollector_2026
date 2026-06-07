@@ -2,10 +2,13 @@ import copy
 import json
 import logging
 import re
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 import psycopg2 as pg
+from psycopg2 import InterfaceError, OperationalError
 from pytz import timezone
 
 from MSG import TD
@@ -30,32 +33,117 @@ class msg_to_sql(object):
         self.data_type = data_type
         self.table_format = table_format
 
-        self.conn = pg.connect(
-            database=database_name,
-            user=sql_username,
-            password=sql_password,
-            host=sql_host,
-            port=port
-        )
-        print("database connect successful")
+        self.db_config = {
+            "database": database_name,
+            "user": sql_username,
+            "password": sql_password,
+            "host": sql_host,
+            "port": port,
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        }
 
         self.dbTable = '"{}"."{}"'.format(self.schema_name, self.data_type)
+        self.conn = None
+        self.cur = None
+        self._db_lock = threading.RLock()
+        self.last_db_insert_time = None
+        self._connect()
+
+    def _get_logger(self):
+        return getattr(self, "logger", logging.getLogger("AppLogger"))
+
+    def _connect(self):
+        self.conn = pg.connect(**self.db_config)
+        self.conn.autocommit = False
         self.cur = self.conn.cursor()
-        self.cur.connection.commit()
+        self._get_logger().warning(f"Database connection established for {self.dbTable}")
+
+    def reconnect(self, delay_seconds=2):
+        with self._db_lock:
+            try:
+                if self.cur is not None:
+                    self.cur.close()
+            except Exception:
+                pass
+
+            try:
+                if self.conn is not None:
+                    self.conn.close()
+            except Exception:
+                pass
+
+            self.cur = None
+            self.conn = None
+
+            if delay_seconds:
+                time.sleep(delay_seconds)
+
+            self._connect()
+            self._get_logger().warning(f"Database reconnected for {self.dbTable}")
+
+    def ensure_connection(self):
+        with self._db_lock:
+            if self.conn is None or self.conn.closed != 0 or self.cur is None:
+                self.reconnect(delay_seconds=0)
+
+    def _rollback(self):
+        with self._db_lock:
+            try:
+                self.ensure_connection()
+                self.conn.rollback()
+            except (OperationalError, InterfaceError):
+                self.reconnect()
+
+    def _execute(self, query, params=None):
+        with self._db_lock:
+            last_error = None
+            for attempt in range(2):
+                try:
+                    self.ensure_connection()
+                    if params is None:
+                        self.cur.execute(query)
+                    else:
+                        self.cur.execute(query, params)
+                    return
+                except (OperationalError, InterfaceError) as e:
+                    last_error = e
+                    self._get_logger().warning(
+                        f"Database operation failed for {self.dbTable}; reconnecting. "
+                        f"attempt={attempt + 1}, error={e}"
+                    )
+                    self.reconnect()
+
+            raise last_error
+
+    def _commit(self):
+        with self._db_lock:
+            try:
+                self.ensure_connection()
+                self.conn.commit()
+                self.last_db_insert_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            except (OperationalError, InterfaceError):
+                # Commit failure is not safely retryable because transaction state may be ambiguous.
+                # Reconnect and let the caller/listener decide whether to ACK the message.
+                self.reconnect()
+                raise
 
     def creat_table(self):
-        self.conn.rollback()
-        self.cur.execute('create table if not exists {} ()'.format(self.dbTable))
-        self.conn.commit()
+        self._rollback()
+        self._execute('create table if not exists {} ()'.format(self.dbTable))
+        self._commit()
 
         for col in self.table_format:
-            self.conn.rollback()
-            self.cur.execute(
+            self._rollback()
+            self._execute(
                 'alter table {} add column if not exists {} {}'.format(
                     self.dbTable, col, self.table_format[col]
                 )
             )
-            self.conn.commit()
+            self._commit()
 
     def set_timestamp(self, time_message):
         timestamp = time_message / 1000
@@ -151,9 +239,9 @@ class TD_msg(msg_to_sql):
         col = ','.join(new_data)
         val = tuple(data.values())
 
-        self.conn.rollback()
-        self.cur.execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val))
-        self.conn.commit()
+        self._rollback()
+        self._execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val))
+        self._commit()
 
     def insert_td_frame(self, parsed_body, msg_print=False):
         self.creat_table()
@@ -171,12 +259,12 @@ class TD_msg(msg_to_sql):
             col = ','.join(new_data)
             val = tuple(message.values())
 
-            self.conn.rollback()
-            self.cur.execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val))
-            self.conn.commit()
+            self._rollback()
+            self._execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val))
+            self._commit()
 
             if not msg_print:
-                self.logger.info('TD_data saving to sql .........')
+                self.logger.debug('TD_data saving to sql .........')
 
     def decode_S_class(self, address, data):
         NUM_OF_BITS = 8
@@ -335,9 +423,9 @@ class TD_msg(msg_to_sql):
 
     def creat_insert_initial_state(self, state_container, time):
         dbTable_initial_state = '"{}"."{}"'.format(self.schema_name, self.data_type + '_initial_state')
-        self.conn.rollback()
-        self.cur.execute('create table if not exists {} ()'.format(dbTable_initial_state))
-        self.conn.commit()
+        self._rollback()
+        self._execute('create table if not exists {} ()'.format(dbTable_initial_state))
+        self._commit()
 
         initial_state_table_format = {
             'time': 'TEXT',
@@ -346,23 +434,23 @@ class TD_msg(msg_to_sql):
             'State': 'TEXT',
         }
         for col in initial_state_table_format:
-            self.conn.rollback()
-            self.cur.execute(
+            self._rollback()
+            self._execute(
                 'alter table {} add column if not exists {} {}'.format(
                     dbTable_initial_state, col, initial_state_table_format[col]
                 )
             )
-            self.conn.commit()
+            self._commit()
 
         ini_col = ','.join(['time', 'Type', 'ID', 'State'])
         for i in range(len(state_container)):
             for j in state_container[str(i)]:
                 val_ini = (time,) + (self.get_changed_type(i),) + (j,) + (state_container[str(i)][j],)
-                self.conn.rollback()
-                self.cur.execute(
+                self._rollback()
+                self._execute(
                     "insert into {} ({}) VALUES{}".format(dbTable_initial_state, ini_col, val_ini)
                 )
-                self.conn.commit()
+                self._commit()
 
     def insert_td_DY_frame(self, parsed_body, msg_print=False):
         self.creat_table()
@@ -408,11 +496,11 @@ class TD_msg(msg_to_sql):
                                         ))
 
                                     val_s = val + (j[0],) + (j[1],) + (j[2],)
-                                    self.conn.rollback()
-                                    self.cur.execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val_s))
-                                    self.conn.commit()
+                                    self._rollback()
+                                    self._execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val_s))
+                                    self._commit()
                                     if not msg_print:
-                                        self.logger.info('Derby_data saving to sql .........')
+                                        self.logger.debug('Derby_data saving to sql .........')
 
                     else:
                         hex_data = re.findall("..", data)
@@ -440,13 +528,13 @@ class TD_msg(msg_to_sql):
                                             ))
 
                                         val_s = val + (j[0],) + (j[1],) + (j[2],)
-                                        self.conn.rollback()
-                                        self.cur.execute(
+                                        self._rollback()
+                                        self._execute(
                                             "insert into {} ({}) VALUES{}".format(self.dbTable, col, val_s)
                                         )
-                                        self.conn.commit()
+                                        self._commit()
                                         if not msg_print:
-                                            self.logger.info('Derby_data saving to sql .........')
+                                            self.logger.debug('Derby_data saving to sql .........')
                 else:
                     if msg_print:
                         description = message.get("descr", "")
@@ -457,11 +545,11 @@ class TD_msg(msg_to_sql):
                             message_type, area_id, description, from_berth, to_berth,
                         ))
 
-                    self.conn.rollback()
-                    self.cur.execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val))
-                    self.conn.commit()
+                    self._rollback()
+                    self._execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val))
+                    self._commit()
                     if not msg_print:
-                        self.logger.info('Derby_data saving to sql .........')
+                        self.logger.debug('Derby_data saving to sql .........')
 
 
 class TM_MVT_msg(msg_to_sql):
@@ -495,9 +583,9 @@ class TM_MVT_msg(msg_to_sql):
             val = ()
             for values in body.values():
                 val = val + (str(values),)
-            self.conn.rollback()
-            self.cur.execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val))
-            self.conn.commit()
+            self._rollback()
+            self._execute("insert into {} ({}) VALUES{}".format(self.dbTable, col, val))
+            self._commit()
 
     def insert_MVT_frame(self, parsed_body, msg_print=False):
         self.creat_table()
@@ -505,7 +593,7 @@ class TM_MVT_msg(msg_to_sql):
             self.insert_MVT_data(outer_message)
 
         if not msg_print:
-            self.logger.info('MVT_data saving to sql .........')
+            self.logger.debug('MVT_data saving to sql .........')
 
 
 class VSTP_msg(msg_to_sql):
@@ -529,28 +617,28 @@ class VSTP_msg(msg_to_sql):
         col = ",".join(col_list)
         placeholders = ",".join(["%s"] * len(val_list))
 
-        self.conn.rollback()
-        self.cur.execute(
+        self._rollback()
+        self._execute(
             f"insert into {db_table} ({col}) VALUES ({placeholders})",
             tuple(val_list)
         )
-        self.conn.commit()
+        self._commit()
 
     def _ensure_subtables(self):
         for key in self.vstp_list:
             db_table = '"{}"."{}"'.format(self.schema_name, self.data_type + '_' + key)
-            self.conn.rollback()
-            self.cur.execute('create table if not exists {} ()'.format(db_table))
-            self.conn.commit()
+            self._rollback()
+            self._execute('create table if not exists {} ()'.format(db_table))
+            self._commit()
 
             for col in self.table_format[key]:
-                self.conn.rollback()
-                self.cur.execute(
+                self._rollback()
+                self._execute(
                     'alter table {} add column if not exists {} {}'.format(
                         db_table, col, self.table_format[key][col]
                     )
                 )
-                self.conn.commit()
+                self._commit()
 
     def _extract_common(self, parsed_body):
         msg_type = list(parsed_body.keys())[0]
@@ -680,7 +768,7 @@ class VSTP_msg(msg_to_sql):
                     self._insert_row(dt, loc_row)
 
         if not msg_print:
-            self.logger.info('VSTP_data saving to sql .........')
+            self.logger.debug('VSTP_data saving to sql .........')
 
 
 class RTPPM_msg(msg_to_sql):
@@ -715,17 +803,17 @@ class RTPPM_msg(msg_to_sql):
 
         for i in self.rtppm_list:
             dbTable = '"{}"."{}"'.format(self.schema_name, self.data_type + '_' + i)
-            self.conn.rollback()
-            self.cur.execute('create table if not exists {} ()'.format(dbTable))
-            self.conn.commit()
+            self._rollback()
+            self._execute('create table if not exists {} ()'.format(dbTable))
+            self._commit()
             for col in self.table_format[i]:
-                self.conn.rollback()
-                self.cur.execute(
+                self._rollback()
+                self._execute(
                     'alter table {} add column if not exists {} {}'.format(
                         dbTable, col, self.table_format[i][col]
                     )
                 )
-                self.conn.commit()
+                self._commit()
 
         if 'OperatorPage' in self.rtppm_list:
             dt = '"{}"."{}"'.format(self.schema_name, self.data_type + '_' + 'OperatorPage')
@@ -737,9 +825,9 @@ class RTPPM_msg(msg_to_sql):
                 val = list(items.values())
                 val.append(msg_timestamp)
                 val = tuple(val)
-                self.conn.rollback()
-                self.cur.execute("insert into {} ({}) VALUES{}".format(dt, col, val))
-                self.conn.commit()
+                self._rollback()
+                self._execute("insert into {} ({}) VALUES{}".format(dt, col, val))
+                self._commit()
 
         if 'OOCPage' in self.rtppm_list:
             dt = '"{}"."{}"'.format(self.schema_name, self.data_type + '_' + 'OOCPage')
@@ -751,9 +839,9 @@ class RTPPM_msg(msg_to_sql):
                 val = list(items.values())
                 val.append(msg_timestamp)
                 val = tuple(val)
-                self.conn.rollback()
-                self.cur.execute("insert into {} ({}) VALUES{}".format(dt, col, val))
-                self.conn.commit()
+                self._rollback()
+                self._execute("insert into {} ({}) VALUES{}".format(dt, col, val))
+                self._commit()
 
         if 'NationalPage_Sector' in self.rtppm_list:
             dt = '"{}"."{}"'.format(self.schema_name, self.data_type + '_' + 'NationalPage_Sector')
@@ -765,9 +853,9 @@ class RTPPM_msg(msg_to_sql):
                 val = list(items.values())
                 val.append(msg_timestamp)
                 val = tuple(val)
-                self.conn.rollback()
-                self.cur.execute("insert into {} ({}) VALUES{}".format(dt, col, val))
-                self.conn.commit()
+                self._rollback()
+                self._execute("insert into {} ({}) VALUES{}".format(dt, col, val))
+                self._commit()
 
         if 'NationalPage_Operator' in self.rtppm_list:
             dt = '"{}"."{}"'.format(self.schema_name, self.data_type + '_' + 'NationalPage_Operator')
@@ -779,9 +867,9 @@ class RTPPM_msg(msg_to_sql):
                 val = list(items.values())
                 val.append(msg_timestamp)
                 val = tuple(val)
-                self.conn.rollback()
-                self.cur.execute("insert into {} ({}) VALUES{}".format(dt, col, val))
-                self.conn.commit()
+                self._rollback()
+                self._execute("insert into {} ({}) VALUES{}".format(dt, col, val))
+                self._commit()
 
         if not msg_print:
-            self.logger.info('RTPPM_data saving to sql .........')
+            self.logger.debug('RTPPM_data saving to sql .........')

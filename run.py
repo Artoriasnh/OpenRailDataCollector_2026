@@ -8,6 +8,7 @@ from pathlib import Path
 import Message_to_sql as mts_module
 from Message_to_sql import TD_msg, TM_MVT_msg, VSTP_msg, RTPPM_msg
 from get_data import get_data
+from logging.handlers import RotatingFileHandler
 from MSG import table_format, topic_dict, Listener_dict, TM_MESSAGES
 from SOP_con.SOP import read_SOP, get_container, get_address_update_state_container
 
@@ -57,7 +58,12 @@ class CollectorService:
 
         formatter = logging.Formatter("%(asctime)s - %(message)s")
 
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=500 * 1024 * 1024,
+            backupCount=2,
+            encoding="utf-8"
+        )
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 

@@ -29263,3 +29263,6 @@
 2026-03-24 03:39:15,421 - Collection starting...
 2026-03-24 03:39:15,421 - Rail host=publicdatafeeds.networkrail.co.uk, port=61618, durable=True
 2026-03-24 03:39:15,421 - DB host=host.docker.internal, port=5432, db=postgres, schema=public
+2026-06-07 16:21:50,358 - Collection starting...
+2026-06-07 16:21:50,358 - Rail host=publicdatafeeds.networkrail.co.uk, port=61618, durable=True
+2026-06-07 16:21:50,359 - DB host=host.docker.internal, port=5432, db=postgres, schema=public
